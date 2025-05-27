@@ -1,0 +1,18 @@
+# Arquivos de log
+ai_genesis.log
+
+# Resultados dos ciclos evolutivos
+cycle_*.json
+
+# Versões intermediárias do código evoluído
+core_evolved_c*.py
+
+# Cache do Python
+__pycache__/
+
+# Configuração da API (contém chave secreta)
+openrouter_config.py
+
+# Ambiente virtual (se existir)
+venv/
+*.venv/
