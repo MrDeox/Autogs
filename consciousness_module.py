@@ -198,11 +198,16 @@ class DeliberationEngine:
         if system_state.get('resource_usage', {}).get('cpu_percent', 0) > 80:
             actions.append({'type': 'optimize_performance', 'priority': 0.9, 'reason': 'Uso alto de CPU'}) 
 
-        # Ação: Consultar LLM para novas ideias se estiver estagnado
-        # (Estagnação pode ser definida por múltiplos ciclos sem modificação)
+        # Ação: Consultar LLM para novas ideias se estiver estagnado ou alta complexidade
         cycles_since_mod = system_state['evolution_cycles'] - (system_state['last_modification']['cycle_id'] if system_state.get('last_modification') else 0)
-        if cycles_since_mod > 5: # Exemplo: estagnado após 5 ciclos sem sucesso
-             actions.append({'type': 'seek_external_inspiration', 'priority': 0.7, 'reason': 'Estagnação evolutiva detectada'}) 
+        complexity = system_state['core_metrics'].get('code_transformer_complexity', 0)
+        
+        if cycles_since_mod > 3 or complexity > 150: # Limiares mais sensíveis
+             actions.append({
+                 'type': 'seek_external_inspiration', 
+                 'priority': 0.9, 
+                 'reason': f"Estagnação ({cycles_since_mod} ciclos) ou alta complexidade ({complexity} linhas)"
+             }) 
 
         # Adicionar mais lógicas de geração de ação aqui
         return actions

@@ -28,10 +28,10 @@ except ImportError as e:
 
 # Configuração de logging
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", # Adicionado nome do logger
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler("ai_genesis.log"),
+        logging.FileHandler("ai_genesis.log", mode='a', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
