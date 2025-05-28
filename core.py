@@ -511,13 +511,100 @@ class CodeTransformationEngine:
             return source_code, descriptionon 
     
     def test_modified_code(self, code: str) -> bool:
-        """Testa se o código modificado é sintaticamente válido"""
+        """Testa se o código modificado é sintaticamente válido e passa nos testes unitários."""
         try:
             ast.parse(code)
             logger.debug("Código modificado é sintaticamente válido.")
-            return True
         except SyntaxError as e:
             logger.error(f"Erro de sintaxe no código modificado: {e}")
+            return False
+
+        temp_filename = "temp_evolved_code.py"
+        unit_tests_passed = True  # Assume True initially
+        modified_module = None
+        test_module = None
+        
+        try:
+            # Attempt to import the test module
+            try:
+                # Ensure tests directory is in path if not already
+                if "tests" not in sys.path and os.path.isdir("tests"):
+                    sys.path.insert(0, os.path.abspath("tests"))
+                
+                if 'tests.test_core_logic' in sys.modules:
+                    # Reload to pick up any changes if it's already imported
+                    test_module = importlib.reload(sys.modules['tests.test_core_logic'])
+                    logger.debug("Reloaded existing tests.test_core_logic module.")
+                else:
+                    test_module = importlib.import_module("tests.test_core_logic")
+                    logger.debug("Imported tests.test_core_logic module for the first time.")
+            except ImportError as e:
+                logger.warning(f"Não foi possível importar o módulo de teste tests.test_core_logic: {e}. Nenhum teste será executado.")
+                # If test module cannot be imported, we can't run tests, but the code itself might be valid.
+                # Depending on strictness, one might set unit_tests_passed = False here.
+                # For now, if no tests are found/loaded, we consider it as "passing" (no failures).
+                return True # Or handle as a failure if tests are mandatory
+
+            # Write the modified code to a temporary file
+            with open(temp_filename, "w", encoding="utf-8") as f:
+                f.write(code)
+            
+            # Dynamically load the modified code from the temporary file
+            spec = importlib.util.spec_from_file_location("temp_evolved_code", temp_filename)
+            if spec is None:
+                logger.error(f"Não foi possível criar spec para o módulo modificado em {temp_filename}")
+                return False # Cannot proceed if spec creation fails
+            
+            modified_module = importlib.util.module_from_spec(spec)
+            if modified_module is None:
+                logger.error(f"Não foi possível criar o módulo a partir da spec para {temp_filename}")
+                return False # Cannot proceed if module creation fails
+            
+            # Add to sys.modules BEFORE executing, so it can be imported by test_core_logic
+            sys.modules['temp_evolved_code'] = modified_module
+            spec.loader.exec_module(modified_module)
+            logger.debug(f"Módulo modificado '{temp_filename}' carregado como 'temp_evolved_code'.")
+
+            test_functions_found = 0
+            for attr_name in dir(test_module):
+                if attr_name.startswith("test_") and callable(getattr(test_module, attr_name)):
+                    test_func = getattr(test_module, attr_name)
+                    test_functions_found += 1
+                    logger.debug(f"Running test: {test_func.__name__}")
+                    try:
+                        test_func() # Test functions are expected to import 'temp_evolved_code'
+                        logger.info(f"Test {test_func.__name__} PASSED.")
+                    except Exception as e:
+                        unit_tests_passed = False
+                        logger.warning(f"Test {test_func.__name__} FAILED: {e}")
+                        logger.error(traceback.format_exc())
+            
+            if test_functions_found == 0:
+                logger.info("No test functions (starting with 'test_') found in tests.test_core_logic.")
+                # unit_tests_passed remains True as no tests failed.
+
+        except Exception as e:
+            logger.error(f"Erro durante a execução dos testes unitários: {e}")
+            logger.error(traceback.format_exc())
+            unit_tests_passed = False # Any error during test setup/execution is a failure
+        finally:
+            # Cleanup: remove module from sys.modules and delete temporary file
+            if 'temp_evolved_code' in sys.modules:
+                del sys.modules['temp_evolved_code']
+                logger.debug("Módulo 'temp_evolved_code' removido de sys.modules.")
+            
+            if os.path.exists(temp_filename):
+                try:
+                    os.remove(temp_filename)
+                    logger.debug(f"Arquivo temporário '{temp_filename}' removido.")
+                except Exception as e:
+                    logger.error(f"Erro ao remover arquivo temporário '{temp_filename}': {e}")
+        
+        if unit_tests_passed:
+            logger.info("Código modificado é sintaticamente válido e passou em todos os testes unitários.")
+            return True
+        else:
+            logger.warning("Código modificado é sintaticamente válido, mas falhou em um ou mais testes unitários.")
             return False
 
 
@@ -634,7 +721,7 @@ class SecurityLoggingMechanism:
         self.audit_trail = [] # Ainda não usado, mas planejado
         logger.info("Mecanismo de Segurança e Registro inicializado")
     
-    def log_modification(self, component: str, description: str, code_before: str, code_after: str, cycle_id: int) -> str:
+    def log_modification(self, component: str, description: str, code_before: str, code_after: str, cycle_id: int, tests_passed: bool) -> str:
         """Registra uma modificação no sistema"""
         mod_id = hashlib.md5(f"{component}:{time.time()}".encode()).hexdigest()
         
@@ -646,7 +733,8 @@ class SecurityLoggingMechanism:
             "description": description,
             "code_diff_size": len(code_after) - len(code_before),
             "hash_before": hashlib.md5(code_before.encode()).hexdigest(),
-            "hash_after": hashlib.md5(code_after.encode()).hexdigest()
+            "hash_after": hashlib.md5(code_after.encode()).hexdigest(),
+            "tests_passed": tests_passed,
         }
         
         self.modification_log.append(modification)
@@ -958,7 +1046,8 @@ class AIGenesisCore:
                                     description,
                                     self.source_code,
                                     modified_code,
-                                    current_cycle_id # Passa o ID do ciclo
+                                    current_cycle_id, # Passa o ID do ciclo
+                                    tests_passed=is_valid # Add this new argument
                                 )
                                 
                                 # 7. Aplicação da modificação
