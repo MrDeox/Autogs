@@ -3,6 +3,8 @@ from __future__ import annotations
 # consciousness_module.py
 """Módulo de Consciência Autônoma (MCA) para o AI-Genesis Core"""
 
+import os # For path manipulation
+import re # For parsing
 import time
 import threading
 import random
@@ -11,6 +13,9 @@ import logging
 import requests
 import sys
 from typing import Dict, List, Any, Tuple, Optional
+
+# Assuming core.py is in the same directory or Python path
+from core import CodeFileUtils 
 
 # Importa configurações da API OpenRouter
 try:
@@ -204,6 +209,25 @@ class DeliberationEngine:
     def generate_potential_actions(self, system_state: Dict[str, Any]) -> List[Dict[str, Any]]:
         logger.debug("Gerando ações potenciais...")
         actions = []
+
+        # Check for unintegrated modules
+        generated_modules_dir = "generated_modules"
+        if os.path.exists(generated_modules_dir) and os.path.isdir(generated_modules_dir):
+            try:
+                py_files_in_generated_dir = [
+                    f for f in os.listdir(generated_modules_dir) 
+                    if os.path.isfile(os.path.join(generated_modules_dir, f)) and f.endswith(".py") and f != "__init__.py"
+                ]
+                if py_files_in_generated_dir:
+                    actions.append({
+                        'type': 'attempt_integrate_new_module',
+                        'priority': 0.6, 
+                        'reason': f'Found {len(py_files_in_generated_dir)} new module(s) in {generated_modules_dir} awaiting integration.',
+                        'modules_to_integrate': py_files_in_generated_dir
+                    })
+                    logger.info(f"Action 'attempt_integrate_new_module' generated for {py_files_in_generated_dir}.")
+            except OSError as e:
+                logger.warning(f"Could not list files in {generated_modules_dir} for integration check: {e}")
 
         # Calculate cycles_since_mod (assuming last_modification implies a successful, i.e., applied, modification)
         last_mod_cycle_id = 0
@@ -910,6 +934,126 @@ Evite respostas genéricas. Concentre-se em diagnósticos e sugestões que o AI-
                     }
                 return result 
             
+            elif action_type == 'architecture_expansion':
+                logger.info("Executando ação: Expansão de Arquitetura.")
+                # Default result
+                result = {'success': False, 'message': 'Falha ao expandir arquitetura.'} 
+                
+                # 1. Invoke LLM for architecture suggestion
+                current_system_state_for_llm = self.self_reflection.analyze_system_state(self.core) # Get fresh state for prompt
+                
+                enhanced_action = self.augmented_cognition.enhance_with_llm(action, current_system_state_for_llm)
+
+                if not enhanced_action or 'llm_suggestion' not in enhanced_action:
+                    logger.warning("Falha ao obter sugestão do LLM para expansão de arquitetura.")
+                    result['message'] = "Falha ao obter sugestão do LLM."
+                    return result
+
+                llm_response = enhanced_action['llm_suggestion']
+                logger.debug(f"LLM response for architecture expansion: {llm_response[:500]}...")
+
+                # 2. Parse LLM Response (Simplified initial parsing)
+                parsed_code = None
+                parsed_filename = None
+                parsed_classname = None
+
+                # Attempt to extract Python code block
+                code_match = re.search(r'```python\s*([\s\S]+?)\s*```', llm_response, re.DOTALL)
+                if code_match:
+                    parsed_code = code_match.group(1).strip()
+                    logger.info("Código Python extraído da resposta do LLM.")
+                else:
+                    logger.warning("Nenhum bloco de código Python (```python ... ```) encontrado na resposta do LLM.")
+                    if len(llm_response.splitlines()) > 1 and ("def " in llm_response or "class " in llm_response):
+                        logger.info("Assumindo que a resposta inteira do LLM é código (sem blocos ```python).")
+                        parsed_code = llm_response 
+                    else:
+                        result['message'] = "Nenhum bloco de código Python utilizável encontrado na resposta do LLM."
+                        return result
+
+                # Attempt to extract filename
+                filename_match = re.search(r'Suggested Filename:\s*([\w.-]+\.py)', llm_response, re.IGNORECASE)
+                if filename_match:
+                    parsed_filename = filename_match.group(1).strip()
+                    logger.info(f"Nome de arquivo sugerido extraído: {parsed_filename}")
+                else:
+                    parsed_filename = f"generated_module_{int(time.time())}.py"
+                    logger.warning(f"Nome de arquivo não encontrado na resposta do LLM. Usando nome gerado: {parsed_filename}")
+
+                # Attempt to extract class name
+                classname_match = re.search(r'Main Class:\s*(\w+)', llm_response, re.IGNORECASE)
+                if classname_match:
+                    parsed_classname = classname_match.group(1).strip()
+                    logger.info(f"Nome da classe principal extraído: {parsed_classname}")
+                else: 
+                    if parsed_code:
+                        class_in_code_match = re.search(r'class\s+(\w+)\s*\(', parsed_code)
+                        if class_in_code_match:
+                            parsed_classname = class_in_code_match.group(1)
+                            logger.info(f"Nome da classe principal inferido do código: {parsed_classname}")
+
+                if not parsed_code: 
+                    result['message'] = "Não foi possível extrair código da resposta do LLM."
+                    return result
+
+                # Sanitize filename
+                parsed_filename = re.sub(r'[^a-zA-Z0-9_.-]', '', parsed_filename)
+                if not parsed_filename.endswith(".py"):
+                    parsed_filename += ".py"
+                
+                # 3. Create Module File
+                base_generated_dir = "generated_modules" 
+                safe_filename = os.path.basename(parsed_filename)
+                filepath = os.path.join(base_generated_dir, safe_filename)
+                
+                file_created, creation_message = CodeFileUtils.create_module_file(filepath, parsed_code, overwrite=False)
+
+                if file_created:
+                    logger.info(f"Novo módulo de arquitetura criado: {filepath}")
+                    result['success'] = True
+                    result['message'] = f"Novo módulo '{filepath}' criado com sucesso. Integração manual ou via ação futura é necessária."
+                    result['filepath'] = filepath
+                    result['llm_suggestion'] = llm_response 
+
+                    integration_steps = f"Integração do módulo '{filepath}' (classe principal: {parsed_classname or 'N/A'}) envolveria tipicamente:\n"
+                    integration_steps += f"1. Adicionar 'from {base_generated_dir.replace('/', '.')} import {safe_filename[:-3]}' em core.py (ou arquivo relevante).\n"
+                    if parsed_classname:
+                        instance_name = parsed_classname[0].lower() + parsed_classname[1:] + "_instance" 
+                        integration_steps += f"2. Adicionar 'self.{instance_name} = {safe_filename[:-3]}.{parsed_classname}(self)' em AIGenesisCore.__init__.\n"
+                        integration_steps += f"3. Adicionar '\"{instance_name}\": self.{instance_name}' ao dicionário self.components em AIGenesisCore."
+                    else:
+                        integration_steps += "2. Instanciar e registrar o componente em AIGenesisCore (nome da classe principal não determinado)."
+                    logger.info(integration_steps)
+                    result['integration_hint'] = integration_steps
+                else:
+                    logger.error(f"Falha ao criar o arquivo do novo módulo: {creation_message}")
+                    result['message'] = f"Falha ao criar o arquivo do novo módulo: {creation_message}"
+                    result['llm_suggestion'] = llm_response
+                
+                return result
+            
+            elif action_type == 'attempt_integrate_new_module':
+                modules_to_integrate = action.get('modules_to_integrate', [])
+                logger.info(f"Executando Ação (Placeholder): Tentativa de integrar novos módulos: {modules_to_integrate}")
+                
+                integration_message = (
+                    "Integração real de módulos ainda não implementada. Passos futuros envolveriam: "
+                    "1. Selecionar um módulo da lista (ex: o mais antigo, ou com base em critérios). "
+                    "2. Analisar o conteúdo do módulo (ex: identificar classe principal, dependências). "
+                    "3. Modificar AIGenesisCore (core.py) para: a) importar o novo módulo, b) instanciar sua classe principal em __init__, c) registrá-lo em self.components. "
+                    "4. Utilizar CodeTransformationEngine para aplicar estas modificações de forma segura. "
+                    "5. Executar testes de regressão e testes para o novo módulo após a tentativa de integração."
+                )
+                logger.info(integration_message)
+                
+                result = {
+                    'success': True, # Placeholder action is 'successful' in that it ran
+                    'message': 'Ação placeholder para integração de novo módulo. Lógica de integração real não implementada.',
+                    'detailed_steps_for_future': integration_message,
+                    'modules_found': modules_to_integrate
+                }
+                return result
+
             # Adicionar handlers para outros tipos de ação ('architecture_expansion', 'self_improvement', etc.)
             else:
                 logger.error(f"Tipo de ação desconhecido ou não manipulado: {action_type}")

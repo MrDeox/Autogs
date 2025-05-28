@@ -37,6 +37,48 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AI-Genesis.Core") # Logger específico para o Core
 
+class CodeFileUtils:
+    @staticmethod
+    def create_module_file(filepath: str, code_content: str, overwrite: bool = False) -> Tuple[bool, str]:
+        """
+        Creates a Python module file at the given filepath with the provided code content.
+
+        Args:
+            filepath: The full path (including filename) where the module should be created.
+            code_content: A string containing the Python code for the module.
+            overwrite: If True, overwrite the file if it exists. 
+                       If False and the file exists, the operation will fail.
+
+        Returns:
+            A tuple (success: bool, message: str).
+        """
+        logger.debug(f"Attempting to create module file at: {filepath}")
+        try:
+            directory_path = os.path.dirname(filepath)
+            if directory_path: # Only create if directory_path is not empty (i.e., not current dir)
+                os.makedirs(directory_path, exist_ok=True)
+                logger.debug(f"Ensured directory exists: {directory_path}")
+
+            if os.path.exists(filepath) and not overwrite:
+                message = f"File {filepath} already exists and overwrite is False."
+                logger.warning(message)
+                return False, message
+
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(code_content)
+            
+            message = f"Module {filepath} created/overwritten successfully."
+            logger.info(message)
+            return True, message
+        except IOError as e:
+            message = f"IOError writing to {filepath}: {e}"
+            logger.error(message)
+            return False, message
+        except Exception as e:
+            message = f"Unexpected error creating module file {filepath}: {e}"
+            logger.error(message, exc_info=True) # Log traceback for unexpected errors
+            return False, message
+
 # --- Componentes Principais (MetaCognition, CodeTransformation, etc.) ---
 # (Código das classes MetaCognitionCore, CodeTransformationEngine, 
 # EvolutionaryPatternLibrary, PerceptionActionInterface, SecurityLoggingMechanism 

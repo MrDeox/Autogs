@@ -1,19 +1,26 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, mock_open
 import hashlib
 import time # For timestamping episodes
+import os # For path manipulation in new tests
+import re # For parsing in new tests
+
 
 # Attempt to import the classes from consciousness_module.py
 try:
     # This path might be used if 'tests' is a package and run with 'python -m unittest tests.test_consciousness_module' from parent
     from ..consciousness_module import EpisodicMemory, DeliberationEngine, ConsciousnessModule
+    from ..core import CodeFileUtils # Add CodeFileUtils
 except ImportError:
     # Fallback for running script directly or if structure is different (e.g. from workspace root)
     import sys
-    import os
-    # Add the parent directory (project root) to sys.path if 'consciousness_module.py' is there
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    # Ensure the parent directory (project root) is in sys.path
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
     from consciousness_module import EpisodicMemory, DeliberationEngine, ConsciousnessModule
+    from core import CodeFileUtils # Add CodeFileUtils
 
 class TestEpisodicMemory(unittest.TestCase):
 
@@ -312,17 +319,42 @@ class TestDeliberationEngine(unittest.TestCase):
 
 class TestConsciousnessModuleActions(unittest.TestCase):
     def setUp(self):
-        self.patcher = patch('consciousness_module.logger')
-        self.mock_logger = self.patcher.start()
-        self.addCleanup(self.patcher.stop)
+        self.logger_patcher = patch('consciousness_module.logger')
+        self.mock_logger = self.logger_patcher.start()
 
-        self.mock_core_ref = MagicMock()
+        self.mock_core_ref = MagicMock(name="CoreRef")
+        self.mock_core_ref.meta_cognition = MagicMock()
+        self.mock_core_ref.meta_cognition.evaluate_system.return_value = {} 
+        self.mock_core_ref.components = {}
+        self.mock_core_ref.evolution_cycles = 0
+        self.mock_core_ref.security = MagicMock()
+        self.mock_core_ref.security.modification_log = []
+
+
         self.consciousness = ConsciousnessModule(core_reference=self.mock_core_ref)
         
-        # Replace real instances with mocks
+        self.consciousness.self_reflection = MagicMock() 
+        self.consciousness.self_reflection.analyze_system_state.return_value = {'evolution_cycles': 0} 
+
         self.consciousness.episodic_memory = MagicMock(spec=EpisodicMemory)
-        self.consciousness.augmented_cognition = MagicMock() # Mock the whole interface
-        self.consciousness.augmented_cognition.openrouter = MagicMock() # Mock the openrouter attribute within the mocked interface
+        
+        self.consciousness.augmented_cognition = MagicMock()
+        self.consciousness.augmented_cognition.openrouter = MagicMock()
+        self.consciousness.augmented_cognition.openrouter.generate_completion = MagicMock()
+        
+        # Configurable side_effect for enhance_with_llm
+        def mock_enhance_with_llm(action, core_state):
+            if hasattr(self.consciousness.augmented_cognition.enhance_with_llm, 'return_value_config'):
+                return self.consciousness.augmented_cognition.enhance_with_llm.return_value_config
+            # Default behavior if not configured by a specific test
+            return {'llm_suggestion': "Default mock suggestion"} if action.get('type') != 'no_suggestion_action' else None
+        
+        self.consciousness.augmented_cognition.enhance_with_llm.side_effect = mock_enhance_with_llm
+
+
+    def tearDown(self):
+        self.logger_patcher.stop()
+        patch.stopall() 
 
 
     def test_execute_review_past_failures_no_recent_failures(self):
@@ -352,7 +384,6 @@ class TestConsciousnessModuleActions(unittest.TestCase):
         self.assertEqual(result['llm_suggestion'], "LLM suggestion content")
         self.consciousness.augmented_cognition.openrouter.generate_completion.assert_called_once()
         
-        # Check prompt
         call_args = self.consciousness.augmented_cognition.openrouter.generate_completion.call_args
         prompt_sent = call_args.kwargs['prompt']
         self.assertIn("Falha na ação 'evolution_cycle' (Alvo: test_module) (Razão: test_reason).", prompt_sent)
@@ -367,7 +398,7 @@ class TestConsciousnessModuleActions(unittest.TestCase):
             'timestamp': time.time()
         }
         self.consciousness.episodic_memory.episodes = [failed_episode]
-        self.consciousness.augmented_cognition.openrouter.generate_completion.return_value = None # LLM returns None
+        self.consciousness.augmented_cognition.openrouter.generate_completion.return_value = None 
 
         action = {'type': 'review_past_failures'}
         result = self.consciousness._execute_action(action)
@@ -377,6 +408,99 @@ class TestConsciousnessModuleActions(unittest.TestCase):
         self.consciousness.augmented_cognition.openrouter.generate_completion.assert_called_once()
         self.assertIn("Falha na ação 'evolution_cycle'", result['prompt_sent'])
         self.assertIn("Detalhe do erro: Another error", result['prompt_sent'])
+
+    # --- New tests for architecture_expansion ---
+    @patch('consciousness_module.CodeFileUtils.create_module_file')
+    def test_execute_architecture_expansion_success(self, mock_create_module_file):
+        llm_response_text = """
+        Suggested Filename: new_component.py
+        Main Class: NewComponent
+        ```python
+        class NewComponent:
+            def __init__(self, core_ref):
+                self.core = core_ref
+                print("NewComponent initialized")
+            
+            def perform_task(self):
+                return "task_done"
+        ```
+        Some other text.
+        """
+        self.consciousness.augmented_cognition.enhance_with_llm.return_value_config = {'llm_suggestion': llm_response_text}
+        mock_create_module_file.return_value = (True, "File created successfully")
+        
+        action = {'type': 'architecture_expansion', 'reason': 'Test expansion'}
+        result = self.consciousness._execute_action(action)
+
+        self.assertTrue(result['success'])
+        expected_filepath = os.path.join("generated_modules", "new_component.py")
+        self.assertEqual(result['filepath'], expected_filepath)
+        
+        expected_parsed_code = 'class NewComponent:\n            def __init__(self, core_ref):\n                self.core = core_ref\n                print("NewComponent initialized")\n            \n            def perform_task(self):\n                return "task_done"'
+        mock_create_module_file.assert_called_once_with(expected_filepath, expected_parsed_code, overwrite=False)
+        
+        self.assertIn("Integração do módulo", result['integration_hint'])
+        self.assertIn("new_component.NewComponent(self)", result['integration_hint'])
+
+    def test_execute_architecture_expansion_llm_fails(self):
+        self.consciousness.augmented_cognition.enhance_with_llm.return_value_config = None # Simulate LLM failure
+        
+        action = {'type': 'architecture_expansion', 'reason': 'Test LLM fail'}
+        result = self.consciousness._execute_action(action)
+        
+        self.assertFalse(result['success'])
+        self.assertEqual(result['message'], "Falha ao obter sugestão do LLM.")
+
+    @patch('consciousness_module.CodeFileUtils.create_module_file')
+    def test_execute_architecture_expansion_parsing_fails_no_code(self, mock_create_module_file):
+        llm_response_text = "No code block here. Just text. Suggested Filename: test.py"
+        self.consciousness.augmented_cognition.enhance_with_llm.return_value_config = {'llm_suggestion': llm_response_text}
+        
+        action = {'type': 'architecture_expansion', 'reason': 'Test no code'}
+        result = self.consciousness._execute_action(action)
+        
+        self.assertFalse(result['success'])
+        self.assertEqual(result['message'], "Nenhum bloco de código Python utilizável encontrado na resposta do LLM.")
+        mock_create_module_file.assert_not_called()
+
+    @patch('consciousness_module.CodeFileUtils.create_module_file')
+    @patch('time.time', MagicMock(return_value=12345)) # Mock time for predictable fallback filename
+    def test_execute_architecture_expansion_parsing_fallback_filename_classname(self, mock_create_module_file):
+        llm_response_text = """
+        ```python
+        class MyFallbackComponent:
+            def __init__(self):
+                pass
+        ```
+        """
+        self.consciousness.augmented_cognition.enhance_with_llm.return_value_config = {'llm_suggestion': llm_response_text}
+        mock_create_module_file.return_value = (True, "File created successfully")
+        
+        action = {'type': 'architecture_expansion', 'reason': 'Test fallbacks'}
+        result = self.consciousness._execute_action(action)
+
+        self.assertTrue(result['success'])
+        expected_filename = "generated_module_12345.py"
+        expected_filepath = os.path.join("generated_modules", expected_filename)
+        self.assertEqual(result['filepath'], expected_filepath)
+        
+        expected_parsed_code = 'class MyFallbackComponent:\n            def __init__(self):\n                pass'
+        mock_create_module_file.assert_called_once_with(expected_filepath, expected_parsed_code, overwrite=False)
+        self.assertIn("MyFallbackComponent(self)", result['integration_hint']) # Class name inferred
+        self.assertIn(f"from generated_modules import {expected_filename[:-3]}", result['integration_hint'])
+
+
+    @patch('consciousness_module.CodeFileUtils.create_module_file')
+    def test_execute_architecture_expansion_file_creation_fails(self, mock_create_module_file):
+        llm_response_text = "```python\nclass Test: pass\n```"
+        self.consciousness.augmented_cognition.enhance_with_llm.return_value_config = {'llm_suggestion': llm_response_text}
+        mock_create_module_file.return_value = (False, "Disk full error from mock")
+        
+        action = {'type': 'architecture_expansion', 'reason': 'Test file fail'}
+        result = self.consciousness._execute_action(action)
+        
+        self.assertFalse(result['success'])
+        self.assertEqual(result['message'], "Falha ao criar o arquivo do novo módulo: Disk full error from mock")
 
 if __name__ == '__main__':
     unittest.main()
