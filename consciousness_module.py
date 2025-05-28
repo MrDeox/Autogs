@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # consciousness_module.py
 """Módulo de Consciência Autônoma (MCA) para o AI-Genesis Core"""
 
@@ -74,13 +76,33 @@ class OpenRouterInterface:
         logger.info(f"Modelo gratuito/alternativo selecionado: {best_model} para capacidades {capabilities_needed}")
         return best_model
     def generate_completion(self, prompt: str, model: Optional[str] = None, capabilities: Optional[List[str]] = None, max_tokens: int = 1000) -> Optional[str]:
-        """Gera uma resposta usando o modelo especificado ou o modelo padrão forçado (deepseek-r1t-chimera)."""
+        """Gera uma resposta usando o modelo LLM, selecionado dinamicamente ou especificado."""
         if not self.api_key: return None # Retorna None se a API não está configurada
 
-        # Força o uso do modelo especificado pelo usuário, ignorando seleção automática
-        forced_model = "tngtech/deepseek-r1t-chimera:free"
-        selected_model = forced_model
-        logger.info(f"Forçando uso do modelo LLM padrão: {selected_model}")
+        selected_model_for_request = None # Renamed to avoid confusion with the 'model' argument
+        if model: # If a specific model is provided as an argument
+            selected_model_for_request = model
+            logger.info(f"Usando modelo LLM fornecido diretamente: {selected_model_for_request}")
+        elif capabilities: # If capabilities are provided, try to select based on them
+            logger.info(f"Tentando selecionar modelo LLM com base nas capacidades: {capabilities}")
+            # select_model already handles cost_preference internally (forced to "free")
+            selected_model_from_capabilities = self.select_model(capabilities_needed=capabilities) 
+            if selected_model_from_capabilities:
+                selected_model_for_request = selected_model_from_capabilities
+                logger.info(f"Modelo LLM selecionado por capacidades: {selected_model_for_request}")
+            else:
+                logger.warning(f"Nenhum modelo encontrado para as capacidades: {capabilities}. Tentando fallback.")
+        
+        if not selected_model_for_request:
+            # Fallback to a default model if no model was provided or selected
+            default_fallback_model = "tngtech/deepseek-r1t-chimera:free" 
+            selected_model_for_request = default_fallback_model
+            logger.info(f"Usando modelo LLM de fallback padrão: {selected_model_for_request} (nenhum modelo fornecido ou selecionado por capacidades).")
+
+        # Ensure selected_model_for_request is not None before proceeding
+        if not selected_model_for_request:
+            logger.error("Nenhum modelo LLM pôde ser determinado (nem fornecido, nem selecionado, nem fallback). Abortando.")
+            return None
 
         # Rate limiting
         with self.rate_limit_lock:
@@ -97,9 +119,7 @@ class OpenRouterInterface:
             self.last_request_time = time.time() # Atualiza o tempo da última requisição *antes* de fazer a chamada
 
         # Verifica se o modelo selecionado (forçado) é válido (embora não usemos a lista AVAILABLE_MODELS aqui)
-        if not selected_model:
-            logger.error("Modelo LLM padrão forçado não é válido ou não pôde ser determinado.")
-            return None
+        # This check is now implicitly covered by the logic above ensuring selected_model_for_request is not None.
 
         # Cabeçalhos da requisição
         headers = {
@@ -110,12 +130,12 @@ class OpenRouterInterface:
         }
         
         data = {
-            "model": selected_model,
+            "model": selected_model_for_request, # Use the dynamically determined or fallback model
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": min(max_tokens, MAX_TOKENS_PER_REQUEST) # Garante que não exceda o limite global
         }
         
-        logger.info(f"Enviando requisição para OpenRouter (Modelo: {selected_model})")
+        logger.info(f"Enviando requisição para OpenRouter (Modelo: {selected_model_for_request})")
         # Envio da requisição
         for attempt in range(MAX_RETRIES):
             try:
@@ -132,10 +152,10 @@ class OpenRouterInterface:
                 completion = response_data.get("choices", [{}])[0].get("message", {}).get("content")
                 
                 if completion:
-                    logger.info(f"Resposta recebida do modelo {selected_model}")
+                    logger.info(f"Resposta recebida do modelo {selected_model_for_request}")
                     return completion.strip()
                 else:
-                    logger.warning(f"Resposta vazia recebida do modelo {selected_model}. Resposta completa: {response_data}")
+                    logger.warning(f"Resposta vazia recebida do modelo {selected_model_for_request}. Resposta completa: {response_data}")
                     return None # Retorna None se a resposta estiver vazia
 
             except requests.exceptions.RequestException as e:
@@ -184,48 +204,146 @@ class DeliberationEngine:
     def generate_potential_actions(self, system_state: Dict[str, Any]) -> List[Dict[str, Any]]:
         logger.debug("Gerando ações potenciais...")
         actions = []
+
+        # Calculate cycles_since_mod (assuming last_modification implies a successful, i.e., applied, modification)
+        last_mod_cycle_id = 0
+        # Ensure system_state['last_modification'] is a dict and has 'cycle_id'
+        if isinstance(system_state.get('last_modification'), dict):
+            last_mod_cycle_id = system_state['last_modification'].get('cycle_id', 0)
         
+        current_evolution_cycles = system_state.get('evolution_cycles', 0)
+        cycles_since_mod = current_evolution_cycles - last_mod_cycle_id
+
         # Ação padrão: executar ciclo evolutivo se não houver hipóteses pendentes
         if not system_state.get('pending_hypotheses'):
-             actions.append({'type': 'evolution_cycle', 'priority': 0.5, 'reason': 'Manutenção evolutiva'}) 
+            actions.append({'type': 'evolution_cycle', 'priority': 0.5, 'reason': 'Manutenção evolutiva regular'})
 
         # Ação: Tentar aplicar hipótese pendente
         if system_state.get('pending_hypotheses'):
-             # No futuro, poderia selecionar hipóteses específicas
-             actions.append({'type': 'apply_hypothesis', 'priority': 0.8, 'reason': 'Hipótese de melhoria pendente'}) 
+            actions.append({'type': 'apply_hypothesis', 'priority': 0.9, 'reason': 'Hipótese de melhoria pendente'})
 
         # Ação: Otimizar uso de recursos se estiver alto
         if system_state.get('resource_usage', {}).get('cpu_percent', 0) > 80:
-            actions.append({'type': 'optimize_performance', 'priority': 0.9, 'reason': 'Uso alto de CPU'}) 
+            actions.append({'type': 'optimize_performance', 'priority': 0.9, 'reason': 'Uso alto de CPU'})
+        
+        # Ação: Revisar falhas passadas se muitas modificações falharam
+        if cycles_since_mod > 5:
+            actions.append({
+                'type': 'review_past_failures',
+                'priority': 0.85,
+                'reason': f'{cycles_since_mod} ciclos sem modificação efetiva. Revisar falhas anteriores.'
+            })
 
         # Ação: Consultar LLM para novas ideias se estiver estagnado ou alta complexidade
-        cycles_since_mod = system_state['evolution_cycles'] - (system_state['last_modification']['cycle_id'] if system_state.get('last_modification') else 0)
-        complexity = system_state['core_metrics'].get('code_transformer_complexity', 0)
+        # Use .get() for core_metrics and the specific complexity metric to avoid KeyErrors
+        core_metrics = system_state.get('core_metrics', {})
+        complexity = core_metrics.get('code_transformer_complexity', 0) # Assuming this is the correct key based on previous context
         
-        if cycles_since_mod > 3 or complexity > 150: # Limiares mais sensíveis
-             actions.append({
-                 'type': 'seek_external_inspiration', 
-                 'priority': 0.9, 
-                 'reason': f"Estagnação ({cycles_since_mod} ciclos) ou alta complexidade ({complexity} linhas)"
-             }) 
+        reason_for_inspiration_parts = []
+        seek_inspiration = False
 
-        # Adicionar mais lógicas de geração de ação aqui
+        if cycles_since_mod > 3:
+            seek_inspiration = True
+            reason_for_inspiration_parts.append(f"Estagnação ({cycles_since_mod} ciclos)")
+        
+        if complexity > 150: # Limiares mais sensíveis
+            seek_inspiration = True
+            # Use a more generic term like "linhas" or "unidades" if 'complexity' is not strictly lines
+            reason_for_inspiration_parts.append(f"alta complexidade ({complexity} unidades)") 
+
+        if seek_inspiration:
+            actions.append({
+                'type': 'seek_external_inspiration',
+                'priority': 0.75, 
+                'reason': " e ".join(reason_for_inspiration_parts) if reason_for_inspiration_parts else "Necessidade de novas ideias"
+            })
+
         return actions
     
-    def select_best_action(self, actions: List[Dict[str, Any]], system_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def select_best_action(self, actions: List[Dict[str, Any]], system_state: Dict[str, Any], episodic_memory: 'EpisodicMemory') -> Optional[Dict[str, Any]]:
         if not actions:
             logger.debug("Nenhuma ação potencial gerada.")
             return None
+
+        # Phase 1: Adjust priorities based on recent failure rates for the current state_hash
+        actions_after_recent_failure_check = []
+        current_state_hash = system_state.get('state_hash')
+
+        if current_state_hash is None:
+            logger.warning("state_hash não encontrado em system_state. Não será possível o ajuste de prioridade da Fase 1 (falhas recentes).")
+            actions_after_recent_failure_check = [action.copy() for action in actions] # Use original priorities
+        else:
+            for action in actions:
+                action_copy = action.copy()
+                action_type_for_recent_check = action_copy['type']
+                failure_rate = episodic_memory.get_recent_failure_rate(
+                    action_type_for_recent_check,
+                    current_state_hash
+                )
+                
+                if failure_rate > 0.5: # If more than 50% of recent similar attempts failed
+                    original_priority_phase1 = action_copy.get('priority', 0.5)
+                    penalty = 0.3 * original_priority_phase1
+                    action_copy['priority'] = original_priority_phase1 - penalty
+                    logger.info(f"Prioridade (Fase 1) da ação '{action_type_for_recent_check}' ({original_priority_phase1:.2f}) reduzida para {action_copy['priority']:.2f} devido à taxa de falha recente de {failure_rate:.2f} no estado atual.")
+                actions_after_recent_failure_check.append(action_copy)
         
-        # Seleciona a ação com maior prioridade
-        # Desempate aleatório se prioridades forem iguais
-        actions.sort(key=lambda x: x.get('priority', 0), reverse=True)
-        max_priority = actions[0].get('priority', 0)
-        top_actions = [a for a in actions if a.get('priority', 0) == max_priority]
+        if not actions_after_recent_failure_check: # Should only happen if original 'actions' was empty
+             logger.debug("Nenhuma ação após a verificação de falhas recentes (lista original provavelmente vazia).")
+             return None
+
+        # Phase 2: Adjust priorities based on global heuristics from all episodes
+        global_heuristics = episodic_memory.extract_heuristics()
+        final_adjusted_actions = []
+
+        for action_in_progress in actions_after_recent_failure_check:
+            action_copy = action_in_progress.copy() # action_in_progress is already a copy from the first phase or original
+            action_type = action_copy['type']
+            heuristic_data = global_heuristics.get(action_type)
+            
+            current_priority_before_global_adj = action_copy['priority'] # This is priority after recent check
+
+            if heuristic_data and heuristic_data.get('total_attempts', 0) >= 3: # Min 3 attempts for global heuristic
+                success_rate = heuristic_data['success_rate']
+                adjustment_factor = 0.0
+
+                if success_rate < 0.4: adjustment_factor = -0.15    # Significantly poor performance
+                elif success_rate < 0.6: adjustment_factor = -0.05   # Slightly below average
+                elif success_rate > 0.9: adjustment_factor = 0.15    # Significantly good performance
+                elif success_rate > 0.75: adjustment_factor = 0.05   # Good performance
+                
+                if adjustment_factor != 0.0:
+                    new_priority = max(0.0, min(1.0, current_priority_before_global_adj + adjustment_factor))
+                    # Only log if priority actually changed
+                    if abs(new_priority - current_priority_before_global_adj) > 1e-9: # Compare floats carefully
+                        action_copy['priority'] = new_priority
+                        logger.info(f"Prioridade (Fase 2) da ação '{action_type}' ({current_priority_before_global_adj:.2f}) ajustada para {action_copy['priority']:.2f} com base na heurística global (taxa de sucesso: {success_rate:.2f} em {heuristic_data.get('total_attempts',0)} tentativas).")
+            
+            final_adjusted_actions.append(action_copy)
+
+        if not final_adjusted_actions:
+            logger.warning("Nenhuma ação restou após aplicação de heurísticas globais. Isso não deveria acontecer se a lista original não era vazia.")
+            # Fallback to actions after recent failure check if final list is empty
+            final_adjusted_actions = actions_after_recent_failure_check
+
+
+        # Seleciona a ação com maior prioridade (finalmente ajustada)
+        final_adjusted_actions.sort(key=lambda x: x.get('priority', 0), reverse=True)
         
-        selected = random.choice(top_actions)
-        logger.info(f"Ação selecionada: {selected.get('type')} (Prioridade: {selected.get('priority')}, Razão: {selected.get('reason')})")
-        return selected
+        if not final_adjusted_actions: # This means original 'actions' was empty
+             return None
+
+        max_priority = final_adjusted_actions[0].get('priority', 0)
+        top_actions = [a for a in final_adjusted_actions if a.get('priority', 0) == max_priority]
+        
+        selected_action = random.choice(top_actions)
+        
+        # Find original priority (from the initial 'actions' list) for logging comparison
+        original_action_for_logging = next((act for act in actions if act['type'] == selected_action['type']), None)
+        original_priority_val_str = f"{original_action_for_logging.get('priority'):.2f}" if original_action_for_logging else "N/A"
+
+        logger.info(f"Ação selecionada: {selected_action.get('type')} (Prioridade Inicial: {original_priority_val_str}, Prioridade Final Ajustada: {selected_action.get('priority'):.2f}, Razão: {selected_action.get('reason')})")
+        return selected_action
     
     def calculate_reflection_interval(self, system_state: Dict[str, Any]) -> float:
         # Intervalo base
@@ -447,12 +565,126 @@ class EpisodicMemory:
         similar = [ep for ep in self.episodes if ep['state_hash'] == current_state_hash]
         logger.debug(f"{len(similar)} episódios similares encontrados para o estado atual.")
         return similar[-limit:] # Retorna os mais recentes
+
+    def get_recent_failure_rate(self, action_type: str, current_state_hash: str, lookback_period: int = 3) -> float:
+        """
+        Calculates the failure rate for a given action type in a similar state from recent episodes.
+        Failure is defined as 'modification_applied' being False or 'errors' being present in the result.
+        """
+        relevant_episodes = 0
+        failures = 0
+        
+        # Iterate backwards through recent episodes
+        for episode in reversed(self.episodes):
+            if relevant_episodes >= lookback_period:
+                break # Stop after checking enough episodes
+            
+            if episode.get('action', {}).get('type') == action_type and \
+               episode.get('state_hash') == current_state_hash:
+                relevant_episodes += 1
+                result = episode.get('result', {})
+                # Check for failure conditions (specific to 'evolution_cycle' type actions for now)
+                # This condition might need to be generalized if other actions have different success criteria
+                if isinstance(result, dict):
+                    # modification_applied defaults to True if not present for non-cycle actions (e.g. seek_inspiration)
+                    # For evolution_cycle, if modification_applied is False, it's a failure.
+                    # If 'errors' key exists and has content, it's a failure.
+                    modification_applied_successfully = result.get('modification_applied', True)
+                    has_errors = bool(result.get('errors')) # Check if 'errors' list is non-empty
+
+                    if action_type == 'evolution_cycle' or action_type == 'apply_hypothesis':
+                        if not modification_applied_successfully or has_errors:
+                            failures += 1
+                    # For other action types, 'success': False in result might be a failure indicator
+                    elif 'success' in result and not result['success']:
+                         failures += 1
+                    # If no explicit failure, but also no explicit success for certain actions
+                    elif action_type not in ['evolution_cycle', 'apply_hypothesis'] and 'success' not in result:
+                        logger.debug(f"Resultado para ação '{action_type}' não tem 'success' nem 'modification_applied'. Considerado neutro/sucesso: {result}")
+
+
+                elif result is None: # Consider None result as failure too for some actions
+                    logger.debug(f"Resultado None para ação '{action_type}'. Considerado falha.")
+                    failures +=1
+
+        if relevant_episodes == 0:
+            return 0.0 # No relevant recent episodes, so no observed failures
+
+        failure_rate = failures / relevant_episodes
+        logger.debug(f"Calculada taxa de falha para ação '{action_type}' no estado '{current_state_hash}': {failure_rate:.2f} ({failures}/{relevant_episodes} falhas nos últimos {lookback_period} episódios relevantes)")
+        return failure_rate
     
-    def extract_heuristics(self) -> Dict[str, float]:
-        # Placeholder para extração de heurísticas (ex: quais ações funcionam melhor em quais estados)
+    def extract_heuristics(self) -> Dict[str, Dict[str, float]]:
+        """
+        Analyzes all episodes to calculate success rates for each action type.
+        Returns a dictionary mapping action types to their success rate and total attempts.
+        e.g., {'evolution_cycle': {'success_rate': 0.7, 'total_attempts': 10}}
+        """
+        action_outcomes = {} # Stores counts for each action type
+
+        if not self.episodes:
+            logger.info("Nenhum episódio na memória para extrair heurísticas.")
+            return {}
+
+        for episode in self.episodes:
+            action = episode.get('action')
+            if not isinstance(action, dict):
+                logger.debug(f"Episódio ignorado: 'action' não é um dicionário ou está ausente. Episódio: {episode}")
+                continue
+                
+            action_type = action.get('type')
+            if not action_type:
+                logger.debug(f"Episódio ignorado: 'action_type' ausente. Action: {action}")
+                continue
+
+            action_outcomes.setdefault(action_type, {'success': 0, 'failure': 0, 'total': 0})
+            
+            result = episode.get('result', {})
+            is_failure = False
+
+            # Determine success/failure based on action type and result structure
+            if action_type in ['evolution_cycle', 'apply_hypothesis']:
+                if isinstance(result, dict):
+                    # For these actions, success means modification applied and no errors
+                    # modification_applied defaults to False if not present for these types
+                    modification_applied = result.get('modification_applied', False) 
+                    has_errors = bool(result.get('errors'))
+                    if not modification_applied or has_errors:
+                        is_failure = True
+                elif result is None: # No result often implies failure or inability to act
+                    is_failure = True
+            else: # For other generic actions, look for a 'success' key
+                if isinstance(result, dict):
+                    # If 'success' key exists and is False, it's a failure
+                    # If 'success' key doesn't exist, assume success unless other failure indicators are present
+                    if result.get('success', True) is False:
+                        is_failure = True
+                    # Also consider if there's an error message, implying failure
+                    elif result.get('error') is not None:
+                        is_failure = True
+                elif result is None: # No result often implies failure
+                    is_failure = True
+            
+            if is_failure:
+                action_outcomes[action_type]['failure'] += 1
+            else:
+                action_outcomes[action_type]['success'] += 1
+            action_outcomes[action_type]['total'] += 1
+
         heuristics = {}
-        # Lógica de análise dos episódios para derivar regras ou padrões
-        logger.debug("Extração de heurísticas ainda não implementada.")
+        for action_type, data in action_outcomes.items():
+            if data['total'] > 0:
+                success_rate = data['success'] / data['total']
+                heuristics[action_type] = {
+                    'success_rate': success_rate,
+                    'total_attempts': float(data['total']) # Ensure it's float for consistency if used in JSON
+                }
+        
+        if heuristics:
+            logger.info(f"Heurísticas extraídas: {heuristics}")
+        else:
+            logger.info("Nenhuma heurística pôde ser extraída (sem dados de resultado válidos nos episódios).")
+            
         return heuristics
 
 # --- Módulo Principal de Consciência --- 
@@ -507,10 +739,11 @@ class ConsciousnessModule:
                 self.last_reflection_time = time.time()
                 system_state = self.self_reflection.analyze_system_state(self.core)
                 state_hash = hashlib.md5(str(system_state).encode()).hexdigest()
+                system_state['state_hash'] = state_hash # Ensure state_hash is in system_state
                 
                 # 2. Deliberação
                 potential_actions = self.deliberation.generate_potential_actions(system_state)
-                selected_action = self.deliberation.select_best_action(potential_actions, system_state)
+                selected_action = self.deliberation.select_best_action(potential_actions, system_state, self.episodic_memory)
                 
                 # 3. Decisão de agir
                 if selected_action and self.initiative.should_take_action(selected_action, system_state):
@@ -582,6 +815,101 @@ class ConsciousnessModule:
                 # A própria consulta ao LLM já foi feita, apenas registra o resultado
                 logger.info("Ação 'seek_external_inspiration' concluída com consulta ao LLM.")
                 result = {'success': True, 'message': 'Inspiração externa buscada.', 'suggestion': action.get('llm_suggestion')}
+            
+            elif action_type == 'review_past_failures':
+                logger.info("Executando ação: Revisão de falhas anteriores.")
+                result = {'success': False, 'message': 'Nenhuma ação de revisão de falhas implementada ainda.'} # Default
+                
+                failed_episodes_summary = []
+                max_failures_to_review = 5 # How many recent failures to summarize
+                failure_count = 0
+
+                for episode in reversed(self.episodic_memory.episodes):
+                    if failure_count >= max_failures_to_review:
+                        break
+
+                    ep_action = episode.get('action', {})
+                    ep_action_type = ep_action.get('type')
+                    ep_result = episode.get('result', {})
+                    is_failure = False
+
+                    if ep_action_type in ['evolution_cycle', 'apply_hypothesis']:
+                        if isinstance(ep_result, dict):
+                            modification_applied = ep_result.get('modification_applied', False)
+                            has_errors = bool(ep_result.get('errors'))
+                            if not modification_applied or has_errors:
+                                is_failure = True
+                        elif ep_result is None: # No result often implies failure
+                            is_failure = True
+                    # Add more general failure checks if other actions also need to be reviewed
+                    # For now, focusing on evolution/hypothesis application failures
+
+                    if is_failure:
+                        failure_count += 1
+                        summary_item = f"- Falha na ação '{ep_action_type}'"
+                        if ep_action.get('target'): # Check if 'target' exists
+                            summary_item += f" (Alvo: {ep_action.get('target')})"
+                        
+                        # Check if 'reason' exists for the action in the episode
+                        if 'reason' in ep_action: # More direct check
+                             summary_item += f" (Razão: {ep_action['reason']})."
+                        else:
+                             summary_item += "."
+                        
+                        error_details = "Detalhe do erro: "
+                        if isinstance(ep_result, dict) and ep_result.get('errors'):
+                            error_details += "; ".join(map(str,ep_result['errors']))
+                        elif isinstance(ep_result, dict) and not ep_result.get('modification_applied', False) and ep_action_type in ['evolution_cycle', 'apply_hypothesis']:
+                            error_details += "Modificação não aplicada."
+                        elif ep_result is None:
+                            error_details += "Resultado do episódio foi None."
+                        else:
+                            error_details += "Causa da falha não claramente especificada no resultado do episódio."
+                        summary_item += f" {error_details}"
+                        failed_episodes_summary.append(summary_item)
+
+                if not failed_episodes_summary:
+                    logger.info("Nenhuma falha significativa recente encontrada para revisar.")
+                    result = {'success': True, 'message': 'Nenhuma falha significativa recente para revisar.'}
+                    return result # Use 'return' here to exit this elif block
+
+                failure_summary_text = "\n".join(failed_episodes_summary)
+                
+                prompt = f"""
+Você é Zylar de Xylos, uma mente alienígena com conhecimentos avançados de programação e inteligência artificial.
+O sistema AI-Genesis Core, que você auxilia, enfrentou as seguintes falhas recentes em suas tentativas de auto-evolução:
+{failure_summary_text}
+
+Com base nessas falhas, por favor, sugira:
+1. Possíveis causas raiz para esses problemas recorrentes (se um padrão for observável).
+2. Estratégias alternativas ou tipos de hipóteses que o sistema deveria considerar para evitar essas falhas.
+3. Se apropriado, um exemplo de uma nova hipótese (especificando alvo, tipo e razão) que poderia ser mais bem-sucedida ou uma modificação de baixo risco para testar uma nova abordagem.
+Forneça insights acionáveis e práticos para o sistema.
+Evite respostas genéricas. Concentre-se em diagnósticos e sugestões que o AI-Genesis pode usar para ajustar seu comportamento evolutivo.
+"""
+                
+                logger.info("Consultando LLM para análise de falhas passadas...")
+                llm_suggestion = self.augmented_cognition.openrouter.generate_completion(
+                    prompt=prompt,
+                    capabilities=['problem_solving', 'reasoning'] 
+                )
+
+                if llm_suggestion:
+                    logger.info("LLM forneceu sugestões para as falhas passadas.")
+                    result = {
+                        'success': True, 
+                        'message': 'LLM consultado sobre falhas passadas.', 
+                        'llm_suggestion': llm_suggestion
+                    }
+                else:
+                    logger.warning("LLM não forneceu sugestões para as falhas passadas ou a chamada falhou.")
+                    result = {
+                        'success': False, 
+                        'message': 'LLM não forneceu sugestões ou a chamada falhou.',
+                        'prompt_sent': prompt 
+                    }
+                return result 
+            
             # Adicionar handlers para outros tipos de ação ('architecture_expansion', 'self_improvement', etc.)
             else:
                 logger.error(f"Tipo de ação desconhecido ou não manipulado: {action_type}")
