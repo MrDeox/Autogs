@@ -137,6 +137,14 @@ class MetaCognitionCore:
                             "reason": f"Complexidade de {target_component} aumentou {value/previous[metric]:.2f}x",
                             "priority": 0.8
                         })
+                    # Adiciona hipótese de otimização para métricas de desempenho que pioraram
+                    elif "_performance" in metric and value < previous[metric] * 0.85:
+                        hypotheses.append({
+                            "target": target_component,
+                            "type": "optimize_performance",
+                            "reason": f"Desempenho de {target_component} caiu para {value/previous[metric]:.2f}x do valor anterior",
+                            "priority": 0.75
+                        })
 
         # 2. Hipóteses de Expansão de Capacidades (para componentes existentes válidos)
         component_metrics_count = {}
@@ -146,15 +154,31 @@ class MetaCognitionCore:
             if target_component and target_component in valid_component_names:
                  component_metrics_count[target_component] = component_metrics_count.get(target_component, 0) + 1
         
-        for component_name in valid_component_names: # Itera sobre nomes de componentes reais
+        # Diversifica os alvos usando um sistema de rotação com prioridade variável
+        cycle_count = len(self.evaluation_history) if hasattr(self, 'evaluation_history') else 0
+        # Rotaciona os componentes a cada ciclo para garantir diversidade
+        rotated_components = valid_component_names[cycle_count % len(valid_component_names):] + valid_component_names[:cycle_count % len(valid_component_names)]
+        
+        for i, component_name in enumerate(rotated_components):
             count = component_metrics_count.get(component_name, 0)
-            if count < 4: 
-                hypotheses.append({
-                    "target": component_name, # Usa o nome real do componente
-                    "type": "expand_functionality", 
-                    "reason": f"Componente {component_name} com funcionalidade potencialmente limitada ({count} métricas)",
-                    "priority": 0.6
-                })
+            # Prioridade maior para o componente atual no ciclo de rotação
+            priority_boost = 0.2 if i == 0 else 0
+            
+            # Expansão de funcionalidade
+            hypotheses.append({
+                "target": component_name,
+                "type": "expand_functionality", 
+                "reason": f"Componente {component_name} pode receber novas capacidades (ciclo de diversificação)",
+                "priority": 0.6 + priority_boost
+            })
+            
+            # Adiciona hipótese de otimização para todos os componentes, não apenas os que pioraram
+            hypotheses.append({
+                "target": component_name,
+                "type": "optimize_performance",
+                "reason": f"Otimização proativa de {component_name} para melhorar desempenho geral",
+                "priority": 0.5 + priority_boost
+            })
 
         # 3. Hipótese de Novo Módulo (se o sistema for simples)
         if len(valid_component_names) < 6: 
@@ -162,11 +186,40 @@ class MetaCognitionCore:
                 "target": "system", 
                 "type": "create_new_module", 
                 "reason": "Sistema pode se beneficiar de novas capacidades modulares",
-                "priority": 0.5 
+                "priority": 0.5 + (0.1 * (cycle_count % 3)) # Aumenta prioridade ciclicamente
             })
-            
-        # 4. Hipótese de Otimização (aleatória, para introduzir variedade, alvo válido)
-        if random.random() < 0.1: 
+
+        # 4. Hipótese de integração entre módulos (nova)
+        if len(valid_component_names) >= 2:
+            # Escolhe dois componentes aleatórios para integração
+            import random
+            components_to_integrate = random.sample(valid_component_names, 2)
+            hypotheses.append({
+                "target": components_to_integrate[0],
+                "type": "expand_functionality",
+                "reason": f"Integração entre {components_to_integrate[0]} e {components_to_integrate[1]} para funcionalidade emergente",
+                "priority": 0.65,
+                "integration_target": components_to_integrate[1]  # Componente secundário para integração
+            })
+
+        # Garante diversidade limitando hipóteses do mesmo tipo/alvo
+        unique_hypotheses = []
+        type_target_pairs = set()
+        
+        # Ordena por prioridade antes de filtrar
+        hypotheses.sort(key=lambda h: h.get("priority", 0), reverse=True)
+        
+        for h in hypotheses:
+            pair = (h.get("type"), h.get("target"))
+            if pair not in type_target_pairs:
+                unique_hypotheses.append(h)
+                type_target_pairs.add(pair)
+                # Limita a 2 hipóteses por tipo para garantir diversidade
+                if list(t[0] for t in type_target_pairs).count(h.get("type")) >= 2:
+                    continue
+        
+        logger.info(f"{len(unique_hypotheses)} hipóteses de melhoria únicas e válidas geradas.")
+        return unique_hypotheses
              target_component = random.choice(valid_component_names) # Escolhe de componentes válidos
              hypotheses.append({
                  "target": target_component,
@@ -231,10 +284,19 @@ class CodeTransformationEngine:
         
         return analysis
     
-    def generate_code_modification(self, source_code: str, hypothesis: Dict[str, Any]) -> Tuple[str, str]:
-        """Gera uma modificação de código baseada em uma hipótese, com maior robustez e diversidade"""
-        modification_type = hypothesis.get("type", "")
+    def generate_code_modification(self, source_code: str, hypothesis: Dict[str, Any], llm_suggestion: Optional[str] = None) -> Tuple[str, str]:
+        """Gera uma modificação de código baseada em uma hipótese, tentando gerar código funcional ou placeholders mais estruturados.
+        
+        Args:
+            source_code: O código-fonte atual.
+            hypothesis: Dicionário descrevendo a melhoria proposta.
+            llm_suggestion: (Opcional) Código ou descrição sugerida pelo LLM.
+
+        Returns:
+            Tupla contendo (código modificado, descrição da modificação).
+                modification_type = hypothesis.get("type", "")
         target = hypothesis.get("target", "")
+        reason = hypothesis.get("reason", "N/A") # Captura a razão da hipótese
         modified_code = source_code
         description = "Nenhuma modificação significativa gerada"
         
@@ -245,90 +307,144 @@ class CodeTransformationEngine:
             "pattern_library": "EvolutionaryPatternLibrary",
             "interface": "PerceptionActionInterface",
             "security": "SecurityLoggingMechanism",
-            "consciousness": "ConsciousnessModule" # Adicionado
-            # Adicionar outros módulos se criados
+            "consciousness": "ConsciousnessModule"
         }
 
         try:
             target_class_name = module_to_class_map.get(target)
             class_pattern = f"class {target_class_name}" if target_class_name else None
-            logger.debug(f"Tentando modificar. Tipo: {modification_type}, Alvo: {target}, Classe Alvo: {target_class_name}")
+            logger.debug(f"Tentando modificar. Tipo: {modification_type}, Alvo: {target}, Classe Alvo: {target_class_name}, Razão: {reason}")
 
             # --- Tratamento das Hipóteses --- 
 
             if modification_type == "refactor_simplification":
                 if target_class_name and class_pattern in source_code:
-                    # Implementação inicial: Adiciona um comentário TODO para refatoração
-                    # Análise AST para encontrar métodos longos seria mais robusta, mas complexa
+                    # TODO: Usar LLM para sugerir refatoração específica?
                     insertion_point = source_code.find(class_pattern)
-                    todo_comment = f"\n    # TODO: Refatorar métodos longos ou complexos neste módulo ({target}) - {hypothesis.get('reason')}\n"
+                    todo_comment = f"\n    # TODO: [Refatoração] {reason}. Analisar e simplificar métodos em {target_class_name}.\n"
                     modified_code = source_code[:insertion_point] + todo_comment + source_code[insertion_point:]
-                    description = f"Adicionado lembrete TODO para refatorar/simplificar {target_class_name}"
+                    description = f"Adicionado lembrete TODO para refatorar/simplificar {target_class_name} devido a: {reason}"
                     logger.info(description)
                 else:
                     description = f"Alvo inválido ou não encontrado para refatoração: {target}"
                     logger.warning(description)
-                    return source_code, description
-
+                    # Retorna sem modificar se o alvo for inválido
+                    return source_code, description 
+            
             elif modification_type == "expand_functionality":
                 if target_class_name and class_pattern in source_code:
-                    # Adiciona um método placeholder mais significativo
-                    new_method_name = f"enhance_{target}_capability_{random.randint(100,999)}"
-                    new_method_code = f"""
-    def {new_method_name}(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        # Método placeholder para nova funcionalidade em {target_class_name}
-        # Gerado devido a: {hypothesis.get("reason")}
-        logger.info(f"{{self.__class__.__name__}}.{new_method_name} chamado com {{params}}")
-        # Lógica de exemplo: apenas retorna os parâmetros recebidos
-        return {{'status': 'placeholder_success', 'processed_params': params}}
-"""
-                    # Encontra o final da classe alvo (abordagem simplificada)
-                    class_start_idx = source_code.find(class_pattern)
-                    next_class_idx = source_code.find("\nclass ", class_start_idx + 1)
-                    if next_class_idx == -1: next_class_idx = len(source_code)
-                    insertion_point = source_code.rfind("\n", class_start_idx, next_class_idx)
-                    if insertion_point == -1: insertion_point = next_class_idx
-
-                    indented_method = "\n".join(["    " + line for line in new_method_code.strip().split("\n")])
-                    modified_code = source_code[:insertion_point] + "\n" + indented_method + "\n" + source_code[insertion_point:]
-                    description = f"Adicionado método placeholder {new_method_name} para expandir {target_class_name}"
-                    logger.info(description)
+                    # Encontra o final da classe para inserir o novo método
+                    class_end_index = -1
+                    try:
+                        tree = ast.parse(source_code)
+                        for node in ast.walk(tree):
+                            if isinstance(node, ast.ClassDef) and node.name == target_class_name:
+                                class_end_line = node.end_lineno
+                                lines = source_code.splitlines()
+                                if class_end_line < len(lines):
+                                     class_end_index = sum(len(l) + 1 for l in lines[:class_end_line])
+                                else:
+                                     class_end_index = len(source_code)
+                                break
+                    except Exception as e:
+                        logger.warning(f"Falha ao usar AST para encontrar fim da classe {target_class_name}, usando busca por string: {e}")
+                        start_index = source_code.find(class_pattern)
+                        if start_index != -1:
+                            next_class_index = source_code.find("\nclass ", start_index + 1)
+                            if next_class_index != -1:
+                                class_end_index = next_class_index
+                            else:
+                                class_end_index = len(source_code)
+                    
+                    if class_end_index != -1:
+                        func_name = f"enhance_{target}_capability_{random.randint(100, 999)}"
+                        # Prepara corpo do método, integrando sugestão LLM se disponível (Passo 028)
+                        method_body = f"        # Método gerado para: {reason}\n        pass"
+                        if llm_suggestion:
+                             # Passo 028: Processar e integrar llm_suggestion no código real
+                             try:
+                                 # Tenta extrair código Python funcional da sugestão do LLM
+                                 code_pattern = re.compile(r'```python(.*?)```', re.DOTALL)
+                                 code_blocks = code_pattern.findall(llm_suggestion)
+                                 
+                                 if code_blocks:
+                                     # Usa o primeiro bloco de código encontrado
+                                     code = code_blocks[0].strip()
+                                     # Ajusta a indentação para o método
+                                     code_lines = code.split('\n')
+                                     indented_code = '\n        '.join(code_lines)
+                                     # Integra o código sugerido diretamente
+                                     method_body = f"        # Código funcional sugerido pelo LLM:\n        {indented_code}"
+                                 else:
+                                     # Se não encontrar blocos de código, tenta extrair linhas que parecem código Python
+                                     lines = llm_suggestion.split('\n')
+                                     code_lines = []
+                                     for line in lines:
+                                         # Heurística simples: linhas que parecem código Python
+                                         if re.match(r'^\s*(def|if|for|while|return|import|class|try|except|with|[a-zA-Z_][a-zA-Z0-9_]*\s*=)', line):
+                                             code_lines.append(line)
+                                     
+                                     if code_lines:
+                                         indented_code = '\n        '.join(code_lines)
+                                         method_body = f"        # Código extraído da sugestão do LLM:\n        {indented_code}"
+                                     else:
+                                         # Se não conseguir extrair código, usa a sugestão como comentário
+                                         processed_suggestion = llm_suggestion.replace("\n", "\n        # ")
+                                         method_body = f"        # Implementação sugerida por LLM (requer implementação manual):\n        # {processed_suggestion}\n        pass # TODO: Implementar baseado na sugestão acima"
+                             except Exception as e:
+                                 logger.warning(f"Erro ao processar sugestão do LLM: {e}")
+                                 # Fallback: usa a sugestão como comentário
+                                 processed_suggestion = llm_suggestion.replace("\n", "\n        # ")
+                                 method_body = f"        # Sugestão do LLM (não foi possível processar automaticamente):\n        # {processed_suggestion}\n        pass # TODO: Implementar manualmente"
+                        else:
+                             method_body = f"        # Método gerado para: {reason}\n        logger.info(f\"Executando {func_name} com argumentos {{args}} e {{kwargs}}\")\n        # TODO: Implementar funcionalidade real aqui\n        return {{'status': 'success', 'message': f\"Método {func_name} executado\"}}"
+                        
+                        new_method = f"\n    def {func_name}(self, *args, **kwargs):
+        """Nova capacidade para {target_class_name} baseada na hipótese: {reason}."""
+{method_body}\n"
+                        modified_code = source_code[:class_end_index] + new_method + source_code[class_end_index:]
+                        description = f"Adicionado método {func_name} para expandir {target_class_name} (Razão: {reason})"
+                        logger.info(description)
+                    else:
+                        description = f"Não foi possível encontrar ponto de inserção para novo método em {target_class_name}"
+                        logger.warning(description)
                 else:
                     description = f"Alvo inválido ou não encontrado para expansão: {target}"
                     logger.warning(description)
                     return source_code, description
 
+            elif modification_type == "optimize_performance":
+                 if target_class_name and class_pattern in source_code:
+                    # TODO: Usar LLM para sugerir otimização específica?
+                    insertion_point = source_code.find(class_pattern)
+                    todo_comment = f"\n    # TODO: [Otimização] {reason}. Analisar e otimizar desempenho em {target_class_name}.\n"
+                    modified_code = source_code[:insertion_point] + todo_comment + source_code[insertion_point:]
+                    description = f"Adicionado lembrete TODO para otimizar {target_class_name} devido a: {reason}"
+                    logger.info(description)
+                 else:
+                    description = f"Alvo inválido ou não encontrado para otimização: {target}"
+                    logger.warning(description)
+                    return source_code, description
+            
             elif modification_type == "create_new_module":
-                # Mantém a criação de módulo placeholder, mas melhora nome e log
-                new_module_base_name = f"EvolvedModule{random.randint(100,999)}"
-                new_module_code = f"""
+                # TODO: Implementar geração de nova classe/módulo
+                description = "Geração de novo módulo ainda não implementada."
+                logger.info(description)
 
-class {new_module_base_name}:
-    # Módulo placeholder gerado automaticamente pelo AI-Genesis Core
-    # Razão: {hypothesis.get("reason")}
-    def __init__(self, core_ref=None):
-        self.creation_time = time.time()
-        self.core = core_ref # Opcional: referência ao core
-        logger.info(f"{new_module_base_name} inicializado.")
-        
-    def example_operation(self, data: Any) -> Dict[str, Any]:
-        logger.debug(f"{{self.__class__.__name__}} executando operação com: {{data}}")
-        # Simula alguma lógica
-        result = {{'input_type': str(type(data)), 'processed_at': time.time()}}
-        return {{'status': 'ok', 'result': result}}
+            else:
+                description = f"Tipo de modificação desconhecido ou não suportado: {modification_type}"
+                logger.warning(description)
 
-    def get_metrics(self) -> Dict[str, float]:
-        # Métricas básicas para o novo módulo
-        return {{'uptime_seconds': time.time() - self.creation_time}}
-"""
-                main_guard = "if __name__ == \"__main__\":"
-                insertion_point = source_code.find(main_guard)
-                if insertion_point != -1:
-                    # Adiciona a definição da classe
-                    modified_code = source_code[:insertion_point] + new_module_code + "\n" + source_code[insertion_point:]
-                    
-                    # Tenta adicionar a instanciação no __init__ do Core
-                    core_init_start = modified_code.find("class AIGenesisCore:")
+        except Exception as e:
+            logger.error(f"Erro ao gerar modificação de código: {e}", exc_info=True)
+            modified_code = source_code # Reverte para o código original em caso de erro
+            description = f"Erro durante a geração da modificação: {e}"
+
+        # Garante que sempre retorna uma tupla válida
+        if modified_code == source_code:
+             description = "Nenhuma modificação significativa gerada ou erro ocorreu."
+             
+        return modified_code, descriptions AIGenesisCore:")
                     core_init_func = modified_code.find("def __init__(self):", core_init_start)
                     components_dict_start = modified_code.find("self.components = {", core_init_func)
                     components_dict_end = modified_code.find("}", components_dict_start)
